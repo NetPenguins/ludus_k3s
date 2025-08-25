@@ -1,6 +1,6 @@
 # netpenguins.ludus_k3s
 
-Installs and configures a lightweight k3s Kubernetes cluster on Linux hosts. Supports `server` (control plane) and `agent` (worker) installations.
+Installs and configures a lightweight kubernetes (k3s) cluster on Linux hosts. Supports `server` (control plane) and `agent` (worker) installations.
 
 ## 📝 Quick notes
 
