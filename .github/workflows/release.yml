@@ -10,7 +10,7 @@ name: Release
   workflow_dispatch: 
   push:
     branches:
-      - 'dev'
+      - 'main'
 
 defaults:
   run:
