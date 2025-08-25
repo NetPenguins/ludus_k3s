@@ -86,7 +86,7 @@ ludus:
     cpus: 2
     linux: true
     roles:
-      - ludus_k3s
+      - netpenguins.ludus_k3s
     role_vars:
       ludus_k3s_role: agent
       ludus_k3s_server_url: "https://10.{{ range_second_octet }}.10.10:6443"
