@@ -1,0 +1,143 @@
+---
+- name: Download Kubernetes Dashboard YAML
+  ansible.builtin.include_tasks:
+    file: download_file.yml
+  vars:
+    ludus_download_file_name: kubernetes-dashboard.yaml
+    ludus_download_file_url: https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+    ludus_download_file_host_path: /tmp
+
+- name: Apply Kubernetes Dashboard
+  ansible.builtin.shell: |
+    /usr/local/bin/kubectl apply -f /tmp/kubernetes-dashboard.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  become: true
+  register: dashboard_apply
+  changed_when: "'created' in dashboard_apply.stdout or 'configured' in dashboard_apply.stdout"
+
+- name: Create dashboard admin user YAML
+  ansible.builtin.copy:
+    content: |
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: admin-user
+        namespace: kubernetes-dashboard
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: admin-user
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-admin
+      subjects:
+      - kind: ServiceAccount
+        name: admin-user
+        namespace: kubernetes-dashboard
+      ---
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: admin-user
+        namespace: kubernetes-dashboard
+        annotations:
+          kubernetes.io/service-account.name: "admin-user"
+      type: kubernetes.io/service-account-token
+    dest: /tmp/dashboard-admin.yaml
+    mode: '0644'
+  become: true
+
+- name: Apply dashboard admin user
+  ansible.builtin.shell: |
+    /usr/local/bin/kubectl apply -f /tmp/dashboard-admin.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  become: true
+  register: admin_apply
+  changed_when: "'created' in admin_apply.stdout or 'configured' in admin_apply.stdout"
+
+- name: Wait for dashboard pods to be ready
+  ansible.builtin.shell: |
+    /usr/local/bin/kubectl wait --for=condition=ready pod -l k8s-app=kubernetes-dashboard -n kubernetes-dashboard --timeout=300s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  become: true
+  register: dashboard_ready
+  failed_when: false
+
+- name: Get dashboard admin token
+  ansible.builtin.shell: |
+    /usr/local/bin/kubectl get secret admin-user -n kubernetes-dashboard -o jsonpath="{.data.token}" | base64 -d
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  become: true
+  register: dashboard_token
+  failed_when: false
+
+- name: Create NodePort service for dashboard access
+  ansible.builtin.copy:
+    content: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: kubernetes-dashboard-nodeport
+        namespace: kubernetes-dashboard
+      spec:
+        type: NodePort
+        ports:
+        - port: 443
+          targetPort: 8443
+          nodePort: 30443
+          protocol: TCP
+        selector:
+          k8s-app: kubernetes-dashboard
+    dest: /tmp/dashboard-nodeport.yaml
+    mode: '0644'
+  become: true
+
+- name: Apply NodePort service
+  ansible.builtin.shell: |
+    /usr/local/bin/kubectl apply -f /tmp/dashboard-nodeport.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  become: true
+  register: nodeport_apply
+  changed_when: "'created' in nodeport_apply.stdout or 'configured' in nodeport_apply.stdout"
+
+- name: Save dashboard info to Ludus host
+  ansible.builtin.copy:
+    content: |
+      dashboard_url: "https://{{ ansible_default_ipv4.address }}:30443"
+      dashboard_token: "{{ dashboard_token.stdout if dashboard_token.rc == 0 else 'check manually with: kubectl get secret admin-user -n kubernetes-dashboard -o jsonpath=\"{.data.token}\" | base64 -d' }}"
+      access_instructions: |
+        1. Access dashboard at: https://{{ ansible_default_ipv4.address }}:30443
+        2. Accept the self-signed certificate warning
+        3. Select "Token" authentication
+        4. Use the token provided above
+        5. Alternative: Use kubectl proxy for local access
+    dest: "{{ ludus_install_path | default('/opt/ludus') }}/resources/ludus_k3s/dashboard_info.yml"
+    mode: '0644'
+  delegate_to: localhost
+  become: false
+
+- name: Display dashboard installation information
+  ansible.builtin.debug:
+    msg:
+      - "Kubernetes Dashboard installed successfully!"
+      - "Dashboard URL: https://{{ ansible_default_ipv4.address }}:30443"
+      - "Admin Token: {{ dashboard_token.stdout if dashboard_token.rc == 0 else 'Failed to retrieve - check manually' }}"
+      - "---"
+      - "Access Instructions:"
+      - "1. Open: https://{{ ansible_default_ipv4.address }}:30443"
+      - "2. Accept the self-signed certificate warning"
+      - "3. Select 'Token' for authentication method"
+      - "4. Paste the admin token above"
+      - "---"
+      - "Alternative local access:"
+      - "kubectl proxy --port=8080"
+      - "Then open: http://localhost:8080/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/"
+      - "---"
+      - "Dashboard info saved to: {{ ludus_install_path | default('/opt/ludus') }}/resources/ludus_k3s/dashboard_info.yml"

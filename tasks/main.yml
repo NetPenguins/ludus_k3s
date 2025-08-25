@@ -1,30 +1,77 @@
 ---
-## These are just examples - replace with your tasks
-- name: Debug
+- name: Debug role configuration
   ansible.builtin.debug:
-    var: ludus_dns_server
+    msg:
+      - "ludus_k3s_role: {{ ludus_k3s_role }}"
+      - "Host: {{ inventory_hostname }}"
+      - "All role vars: {{ role_names | default('none') }}"
 
-- name: Message
+- name: Validate k3s role configuration
+  ansible.builtin.fail:
+    msg: "ludus_k3s_role must be either 'server' or 'agent'. Current value: '{{ ludus_k3s_role }}'"
+  when: ludus_k3s_role not in ['server', 'agent']
+
+- name: Validate agent configuration
   ansible.builtin.debug:
-    msg: Put your ansible tasks here
+    msg: "Agent configuration will be auto-discovered from server node"
+  when: ludus_k3s_role == 'agent'
 
-- name: General purpose caching downloader example (Windows)
+- name: Install required packages
+  ansible.builtin.package:
+    name: 
+      - curl
+      - git
+      - tar
+      - wget
+      - ca-certificates
+      - iptables
+      - iptables-persistent
+    state: present
+    update_cache: false
+
+- name: Install additional packages for RHEL/CentOS
+  ansible.builtin.package:
+    name:
+      - iptables-services
+    state: present
+  when: ansible_os_family == "RedHat"
+  failed_when: false
+
+- name: Update ca-certificates
+  ansible.builtin.command: update-ca-certificates
+  become: true
+  when: ansible_os_family == "Debian"
+
+- name: Update ca-certificates (RHEL/CentOS)
+  ansible.builtin.command: update-ca-trust
+  become: true
+  when: ansible_os_family == "RedHat"
+
+- name: Download k3s installation script
   ansible.builtin.include_tasks:
     file: download_file.yml
   vars:
-    ludus_download_file_name: adkwinpesetup.exe
-    ludus_download_file_url: https://download.microsoft.com/download/0/1/C/01CC78AA-B53B-4884-B7EA-74F2878AA79F/adk/adksetup.exe
-    ludus_download_file_host_path: "C:\\ludus\\sccm"
-    # Only use checksums for files that do not update!
-    ludus_download_file_checksum: "sha256:666c4b0813e80ff52b564b4d261e26d1e6e48023164a26a684bff24d12dc2a78"
+    ludus_download_file_name: k3s_install.sh
+    ludus_download_file_url: https://get.k3s.io
+    ludus_download_file_host_path: /tmp
 
-- name: General purpose caching downloader example (Linux)
-  ansible.builtin.include_tasks:
-    file: download_file.yml
-  vars:
-    ludus_download_file_name: elastic-agent-8.13.1-linux-x86_64.tar.gz
-    ludus_download_file_url: https://artifacts.elastic.co/downloads/beats/elastic-agent/elastic-agent-8.13.1-linux-x86_64.tar.gz
-    ludus_download_file_host_path: /opt/elastic
-    # Only use checksums for files that do not update!
-    ludus_download_file_checksum: "sha512:a91a09124eacfdce9cb8d6876ae2896ad0f0682ca8e112ccf2ec5660f3ec4db96b230869f5dc5011136a15d2882a58b71e45775843f31c282ee8c8db9524a27f"
-## Replace above with your tasks
+- name: Make k3s install script executable
+  ansible.builtin.file:
+    path: /tmp/k3s_install.sh
+    mode: '0755'
+
+- name: Install k3s server
+  ansible.builtin.include_tasks: install_server.yml
+  when: ludus_k3s_role == 'server'
+
+- name: Install k3s agent
+  ansible.builtin.include_tasks: install_agent.yml
+  when: ludus_k3s_role == 'agent'
+
+- name: Ensure k3s service is running and enabled
+  ansible.builtin.systemd:
+    name: "{{ 'k3s' if ludus_k3s_role == 'server' else 'k3s-agent' }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+

@@ -1,0 +1,343 @@
+---
+- name: Debug available variables
+  ansible.builtin.debug:
+    msg:
+      - "ansible_stats defined: {{ ansible_stats is defined }}"
+      - "Current server URL: {{ ludus_k3s_server_url }}"
+      - "Current token: {{ 'set' if ludus_k3s_token != '' else 'empty' }}"
+
+- name: Check for cluster info file
+  ansible.builtin.stat:
+    path: "{{ ludus_install_path | default('/opt/ludus') }}/resources/ludus_k3s/cluster_info.yml"
+  register: cluster_info_file
+  delegate_to: localhost
+  become: false
+
+- name: Load cluster info from file
+  block:
+    - name: Read cluster info file
+      ansible.builtin.slurp:
+        src: "{{ ludus_install_path | default('/opt/ludus') }}/resources/ludus_k3s/cluster_info.yml"
+      register: cluster_info_content
+      delegate_to: localhost
+      become: false
+
+    - name: Parse cluster info
+      ansible.builtin.set_fact:
+        cluster_info: "{{ cluster_info_content.content | b64decode | from_yaml }}"
+
+    - name: Set connection info from file
+      ansible.builtin.set_fact:
+        ludus_k3s_server_url: "{{ cluster_info.server_url }}"
+        ludus_k3s_token: "{{ cluster_info.cluster_token }}"
+      when:
+        - ludus_k3s_server_url == "" or ludus_k3s_token == ""
+  when:
+    - cluster_info_file.stat.exists
+    - ludus_k3s_server_url == "" or ludus_k3s_token == ""
+
+- name: Use server info from stats if available (fallback)
+  ansible.builtin.set_fact:
+    ludus_k3s_server_url: "{{ ansible_stats.k3s_server_url }}"
+    ludus_k3s_token: "{{ ansible_stats.k3s_cluster_token }}"
+  when:
+    - ansible_stats is defined
+    - ansible_stats.k3s_server_url is defined
+    - ansible_stats.k3s_cluster_token is defined
+    - (ludus_k3s_server_url == "" or ludus_k3s_token == "")
+
+- name: Validate agent configuration
+  ansible.builtin.fail:
+    msg: |
+      Could not find k3s server information.
+      Either:
+      1. Deploy k3s server nodes first (they will automatically provide connection info)
+      2. Or manually provide ludus_k3s_server_url and ludus_k3s_token variables
+      
+      Debug info:
+      - Cluster info file exists: {{ cluster_info_file.stat.exists if cluster_info_file is defined else 'unknown' }}
+      - ansible_stats available: {{ ansible_stats is defined }}
+      - Server URL: {{ ludus_k3s_server_url }}
+      - Token set: {{ 'yes' if ludus_k3s_token != '' else 'no' }}
+  when: ludus_k3s_server_url == "" or ludus_k3s_token == ""
+
+- name: Display connection info
+  ansible.builtin.debug:
+    msg:
+      - "Connecting to k3s server: {{ ludus_k3s_server_url }}"
+      - "Using token: {{ ludus_k3s_token[:20] }}..."
+
+- name: Check if k3s is already installed
+  ansible.builtin.stat:
+    path: "{{ ludus_k3s_install_dir }}/k3s"
+  register: k3s_binary_check
+
+- name: Stop existing k3s-agent service if running
+  ansible.builtin.systemd:
+    name: k3s-agent
+    state: stopped
+  become: true
+  failed_when: false
+  when: k3s_binary_check.stat.exists
+
+- name: Set k3s agent environment variables
+  ansible.builtin.set_fact:
+    k3s_env:
+      INSTALL_K3S_VERSION: "{{ ludus_k3s_version }}"
+      K3S_URL: "{{ ludus_k3s_server_url }}"
+      K3S_TOKEN: "{{ ludus_k3s_token }}"
+      INSTALL_K3S_EXEC: >-
+        agent
+        {{ ludus_k3s_agent_args }}
+
+- name: Install k3s agent with timeout and better error handling
+  ansible.builtin.shell: |
+    INSTALL_K3S_SKIP_START=true timeout 300 /tmp/k3s_install.sh
+  environment: "{{ k3s_env }}"
+  become: true
+  register: k3s_install_result
+  failed_when: k3s_install_result.rc != 0
+  when: not k3s_binary_check.stat.exists
+
+- name: Display install output on failure
+  ansible.builtin.debug:
+    msg:
+      - "Install stdout: {{ k3s_install_result.stdout }}"
+      - "Install stderr: {{ k3s_install_result.stderr }}"
+  when: 
+    - k3s_install_result is defined
+    - k3s_install_result is not skipped
+    - k3s_install_result.rc is defined
+    - k3s_install_result.rc != 0
+
+- name: Check k3s-agent service status before starting
+  ansible.builtin.systemd:
+    name: k3s-agent
+  register: k3s_service_status
+  become: true
+  failed_when: false
+
+- name: Display service status for debugging
+  ansible.builtin.debug:
+    msg:
+      - "Service exists: {{ k3s_service_status.status is defined }}"
+      - "Service state: {{ k3s_service_status.status.ActiveState if k3s_service_status.status is defined else 'unknown' }}"
+
+- name: Start k3s-agent service manually with better error handling
+  ansible.builtin.systemd:
+    name: k3s-agent
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  register: k3s_start_result
+  failed_when: false
+
+- name: Check service logs if start failed
+  ansible.builtin.shell: journalctl -xeu k3s-agent.service --no-pager -n 20
+  become: true
+  register: k3s_logs
+  when: k3s_start_result.failed | default(false)
+
+- name: Display service logs on failure
+  ansible.builtin.debug:
+    msg:
+      - "k3s-agent service failed to start"
+      - "Service logs:"
+      - "{{ k3s_logs.stdout_lines }}"
+  when: k3s_start_result.failed | default(false)
+
+- name: Fail if service couldn't start
+  ansible.builtin.fail:
+    msg: |
+      k3s-agent service failed to start. Check the logs above.
+      Common issues:
+      1. Token mismatch - verify server token
+      2. Network connectivity to server
+      3. Firewall blocking connection
+      4. Server not ready yet
+  when: k3s_start_result.failed | default(false)
+
+- name: Wait for k3s-agent service to be active
+  ansible.builtin.systemd:
+    name: k3s-agent
+    state: started
+  register: k3s_agent_status
+  until: k3s_agent_status.status.ActiveState == "active"
+  retries: 5
+  delay: 3
+  become: true
+  when: not (k3s_start_result.failed | default(false))
+  failed_when: false
+
+- name: Get detailed service status if not active
+  ansible.builtin.shell: |
+    systemctl status k3s-agent.service --no-pager -l
+  become: true
+  register: service_status
+  failed_when: false
+  when: 
+    - k3s_agent_status is defined
+    - k3s_agent_status.status.ActiveState != "active"
+
+- name: Get service logs for troubleshooting
+  ansible.builtin.shell: |
+    journalctl -xeu k3s-agent.service --no-pager -n 30
+  become: true
+  register: service_logs
+  when: 
+    - k3s_agent_status is defined
+    - k3s_agent_status.status.ActiveState != "active"
+
+- name: Display diagnostic information
+  ansible.builtin.debug:
+    msg:
+      - "Service Status: {{ k3s_agent_status.status.ActiveState if k3s_agent_status.status is defined else 'unknown' }}"
+      - "SubState: {{ k3s_agent_status.status.SubState if k3s_agent_status.status is defined else 'unknown' }}"
+      - "Restart Count: {{ k3s_agent_status.status.NRestarts if k3s_agent_status.status is defined else 'unknown' }}"
+      - "Main PID: {{ k3s_agent_status.status.MainPID if k3s_agent_status.status is defined else 'unknown' }}"
+      - "---"
+      - "Service Status Output:"
+      - "{{ service_status.stdout_lines if service_status is defined else [] }}"
+      - "---"
+      - "Recent Logs:"
+      - "{{ service_logs.stdout_lines if service_logs is defined else [] }}"
+  when: 
+    - k3s_agent_status is defined
+    - k3s_agent_status.status.ActiveState != "active"
+
+- name: Check connectivity to k3s server
+  ansible.builtin.uri:
+    url: "{{ ludus_k3s_server_url }}"
+    method: GET
+    validate_certs: false
+    status_code: [200, 401, 403]
+    timeout: 10
+  register: server_connectivity
+  failed_when: false
+  when: 
+    - k3s_agent_status is defined
+    - k3s_agent_status.status.ActiveState != "active"
+
+- name: Display connectivity test results
+  ansible.builtin.debug:
+    msg:
+      - "Server connectivity test:"
+      - "URL: {{ ludus_k3s_server_url }}"
+      - "Status: {{ server_connectivity.status if server_connectivity.status is defined else 'failed to connect' }}"
+      - "Connection successful: {{ server_connectivity.status is defined and server_connectivity.status in [200, 401, 403] }}"
+  when: 
+    - k3s_agent_status is defined
+    - k3s_agent_status.status.ActiveState != "active"
+
+- name: Continue with setup if service is running (even if activating)
+  ansible.builtin.set_fact:
+    k3s_service_ok: true
+  when: 
+    - k3s_agent_status is defined
+    - k3s_agent_status.status.ActiveState in ["active", "activating"]
+    - k3s_agent_status.status.MainPID != "0"
+    - k3s_agent_status.status.MainPID is defined
+
+- name: Service is ready
+  ansible.builtin.debug:
+    msg:
+      - "k3s-agent service is running successfully"
+      - "State: {{ k3s_agent_status.status.ActiveState }}"
+      - "Main PID: {{ k3s_agent_status.status.MainPID }}"
+      - "Service is functioning correctly"
+  when: k3s_service_ok is defined
+
+- name: Create kubectl symlink for agent nodes
+  ansible.builtin.file:
+    src: "{{ ludus_k3s_install_dir }}/k3s"
+    dest: "{{ ludus_k3s_install_dir }}/kubectl"
+    state: link
+  become: true
+  when: k3s_service_ok is defined
+
+- name: Create kubeconfig directory for regular user
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.kube"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+  become: true
+  when: k3s_service_ok is defined
+
+- name: Copy kubeconfig from Ludus host to agent
+  ansible.builtin.copy:
+    src: "{{ ludus_install_path | default('/opt/ludus') }}/resources/ludus_k3s/kubeconfig.yaml"
+    dest: "/home/{{ ansible_user }}/.kube/config"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0600'
+  become: true
+  when: k3s_service_ok is defined
+  register: kubeconfig_copy
+
+- name: Fix kubeconfig server URL for agent access
+  ansible.builtin.replace:
+    path: "/home/{{ ansible_user }}/.kube/config"
+    regexp: 'https://127.0.0.1:6443'
+    replace: "{{ ludus_k3s_server_url }}"
+  become_user: "{{ ansible_user }}"
+  when: 
+    - k3s_service_ok is defined
+    - kubeconfig_copy is defined
+    - not kubeconfig_copy.failed
+
+- name: Set kubeconfig permissions
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.kube/config"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0600'
+  become: true
+  when: k3s_service_ok is defined
+
+- name: Wait for node to register with cluster
+  ansible.builtin.shell: |
+    /usr/local/bin/kubectl get node {{ ansible_hostname }} --no-headers
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  become_user: "{{ ansible_user }}"
+  register: node_check
+  until: node_check.rc == 0
+  retries: 30
+  delay: 5
+  when: k3s_service_ok is defined
+  failed_when: false
+
+- name: Label agent node as worker
+  ansible.builtin.shell: |
+    /usr/local/bin/kubectl label node {{ ansible_hostname }} node-role.kubernetes.io/worker=worker --overwrite
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  become_user: "{{ ansible_user }}"
+  when: 
+    - k3s_service_ok is defined
+    - node_check.rc == 0
+  register: label_result
+  failed_when: false
+
+- name: Display node labeling result
+  ansible.builtin.debug:
+    msg:
+      - "Node labeling result: {{ 'success' if label_result.rc == 0 else 'failed' }}"
+      - "Output: {{ label_result.stdout if label_result.stdout is defined else 'none' }}"
+      - "Error: {{ label_result.stderr if label_result.stderr is defined and label_result.stderr != '' else 'none' }}"
+  when: label_result is defined
+
+- name: Display k3s agent information
+  ansible.builtin.debug:
+    msg:
+      - "k3s agent setup completed"
+      - "Connected to server: {{ ludus_k3s_server_url }}"
+      - "Agent node: {{ ansible_hostname }}"
+      - "Service state: {{ k3s_agent_status.status.ActiveState if k3s_agent_status.status is defined else 'unknown' }}"
+      - "kubectl available at: {{ ludus_k3s_install_dir }}/kubectl"
+      - "kubeconfig location: /home/{{ ansible_user }}/.kube/config"
+      - "Node labeled as worker: {{ 'yes' if label_result.rc == 0 else 'check manually' }}"
+      - "Verify with: kubectl get nodes"

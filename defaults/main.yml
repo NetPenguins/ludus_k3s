@@ -1,4 +1,37 @@
 ---
 # Role variables should all be prefaced with the name of the role to avoid
 # name conflicts with other roles
-ludus_thing_variable1: true
+
+# k3s installation role - 'server' for control plane, 'agent' for worker nodes
+ludus_k3s_role: server
+
+ludus_k3s_dashboard: false
+
+ludus_k3s_dashboard_type: "" # Options: "kubernetes" (default k8s dashboard), "headlamp", or "" 
+
+# k3s version to install (leave empty for latest stable)
+ludus_k3s_version: ""
+
+# Additional arguments for k3s server
+ludus_k3s_server_args: ""
+
+# Additional arguments for k3s agent
+ludus_k3s_agent_args: ""
+
+# k3s server URL for agents (required when ludus_k3s_role is 'agent')
+ludus_k3s_server_url: ""
+
+# k3s token for cluster joining (auto-generated for servers, required for agents)
+ludus_k3s_token: ""
+
+# Components to disable (traefik, servicelb, local-storage, metrics-server, etc.)
+ludus_k3s_disable_components: []
+
+# kubeconfig file permissions
+ludus_k3s_kubeconfig_mode: "644"
+
+# k3s installation directory
+ludus_k3s_install_dir: /usr/local/bin
+
+# k3s data directory
+ludus_k3s_data_dir: /var/lib/rancher/k3s

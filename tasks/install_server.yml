@@ -1,0 +1,106 @@
+---
+- name: Generate k3s token if not provided
+  ansible.builtin.set_fact:
+    ludus_k3s_token: "{{ ansible_date_time.epoch }}{{ 999999 | random }}"
+  when: ludus_k3s_token == ""
+
+- name: Set k3s server environment variables
+  ansible.builtin.set_fact:
+    k3s_env:
+      INSTALL_K3S_VERSION: "{{ ludus_k3s_version }}"
+      K3S_TOKEN: "{{ ludus_k3s_token }}"
+      INSTALL_K3S_EXEC: >-
+        server
+        {% if ludus_k3s_disable_components | length > 0 %}
+        --disable {{ ludus_k3s_disable_components | join(',') }}
+        {% endif %}
+        --write-kubeconfig-mode {{ ludus_k3s_kubeconfig_mode }}
+        {{ ludus_k3s_server_args }}
+
+- name: Install k3s server
+  ansible.builtin.shell: /tmp/k3s_install.sh
+  environment: "{{ k3s_env }}"
+  args:
+    creates: "{{ ludus_k3s_install_dir }}/k3s"
+  become: true
+
+- name: Wait for k3s server to be ready
+  ansible.builtin.wait_for:
+    port: 6443
+    host: "{{ ansible_default_ipv4.address }}"
+    timeout: 300
+
+- name: Get k3s server token
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/node-token
+  register: k3s_token_file
+  become: true
+
+- name: Create k3s cluster info file on Ludus host
+  ansible.builtin.copy:
+    content: |
+      server_url: "https://{{ ansible_default_ipv4.address }}:6443"
+      cluster_token: "{{ k3s_token_file.content | b64decode | trim }}"
+      server_ip: "{{ ansible_default_ipv4.address }}"
+    dest: "{{ ludus_install_path | default('/opt/ludus') }}/resources/ludus_k3s/cluster_info.yml"
+    mode: '0644'
+  delegate_to: localhost
+  become: false
+
+- name: Save kubeconfig to Ludus host for agents
+  ansible.builtin.fetch:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "{{ ludus_install_path | default('/opt/ludus') }}/resources/ludus_k3s/kubeconfig.yaml"
+    flat: true
+  become: true
+
+- name: Store k3s cluster info for other nodes (backup method)
+  ansible.builtin.set_stats:
+    data:
+      k3s_server_url: "https://{{ ansible_default_ipv4.address }}:6443"
+      k3s_cluster_token: "{{ k3s_token_file.content | b64decode | trim }}"
+      k3s_server_ip: "{{ ansible_default_ipv4.address }}"
+    per_host: false
+
+- name: Create kubectl symlink
+  ansible.builtin.file:
+    src: "{{ ludus_k3s_install_dir }}/k3s"
+    dest: "{{ ludus_k3s_install_dir }}/kubectl"
+    state: link
+  become: true
+
+- name: Create kubeconfig directory for regular user
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.kube"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+  become: true
+
+- name: Copy kubeconfig for regular user
+  ansible.builtin.copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "/home/{{ ansible_user }}/.kube/config"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0600'
+    remote_src: true
+  become: true
+
+- name: Display k3s server information
+  ansible.builtin.debug:
+    msg:
+      - "k3s server installed successfully"
+      - "Server URL: https://{{ ansible_default_ipv4.address }}:6443"
+      - "Token: {{ k3s_token_file.content | b64decode | trim }}"
+      - "Kubeconfig: /etc/rancher/k3s/k3s.yaml"
+      - "User kubeconfig: /home/{{ ansible_user }}/.kube/config"
+      - "kubectl available at: {{ ludus_k3s_install_dir }}/kubectl"
+      - "Cluster info saved for agent nodes"
+
+- name: Install Kubernetes Dashboard
+  ansible.builtin.include_tasks: install_dashboard.yml
+  when: 
+    - ludus_k3s_dashboard | bool
+    - ludus_k3s_dashboard_type == "kubernetes" or ludus_k3s_dashboard_type == ""

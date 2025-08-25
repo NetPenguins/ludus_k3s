@@ -1,68 +1,121 @@
-# README
+# netpenguins.ludus_k3s
 
-This template includes a task yml for caching downloads to the Ludus host (download_file.yml) as well as GitHub action to push the role to Ansible Galaxy when a tag is created in git. You'll need to get a [Galaxy token](https://galaxy.ansible.com/ui/token/) and set it as `GALAXY_API_KEY` in [Github Secrets](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions#creating-secrets-for-a-repository) for the Ansible Galaxy deployment to work correctly.
+Installs and configures a lightweight k3s Kubernetes cluster on Linux hosts. Supports `server` (control plane) and `agent` (worker) installations.
 
-Remove this section, and replace all `{{ variable }}` strings. Write your tasks in `./tasks/main.yml`
+## 📝 Quick notes
 
-# Ansible Role: {{ Thing }} ([Ludus](https://ludus.cloud))
+- Targets Linux hosts (Ubuntu/Debian)
+- [🚧 WIP] Dashboard: the role can deploy a dashboard. `ludus_k3s_dashboard_type` supports `"kubernetes"`, or empty (none).
+- I usually spin up a Windows machine in my config installing Headlamps desktop app via choco for inspecting/managing clusters. Headlamp is lightweight and easy to run — https://headlamp.dev
 
-An Ansible Role that installs [{{ Something }}](https://example.com) on {{ type of host }} and optionally configures [{{ Another Thing }}](https://example).
+## 🛠️ Installation in Ludus
 
-> [!WARNING]
-> This is a warning about something in this role
+#### Install via Ansible Galaxy:
 
-## Requirements
-
-None.
-
-## Role Variables
-
-Available variables are listed below, along with default values (see `defaults/main.yml`):
-
-    # This is a comment explaining the variable below
-    ludus_thing_variable1: true
-
-## Dependencies
-
-None.
-
-## Example Playbook
-
-```yaml
-- hosts: {{ thing }}_hosts
-  roles:
-    - {{ your github username }}.{{ this repo name }}
-  vars:
-    {{ role vars here }}
+```sh
+ludus ansible role add netpenguins.ludus_k3s
 ```
 
-## Example Ludus Range Config
+#### Or clone directly:
 
-```yaml
+```sh
+git clone https://github.com/netpenguins/ludus_k3s.git /opt/netpenguins.ludus_k3s
+ludus ansible role add /opt/netpenguins.ludus_k3s
+```
+
+## ⚡️ Role Variables
+
+Available variables (see `defaults/main.yml`):
+
+| Variable | Description | Default/Example |
+|---|---|---|
+| `ludus_k3s_role` | Install mode: `server` (control plane) or `agent` (worker) | `server` |
+| `ludus_k3s_version` | k3s version to install (empty = latest) | `""` |
+| `ludus_k3s_server_args` | Extra arguments passed to k3s server | `""` |
+| `ludus_k3s_agent_args` | Extra arguments passed to k3s agent | `""` |
+| `ludus_k3s_server_url` | k3s server URL (required when role is `agent`) | `""` |
+| `ludus_k3s_token` | Cluster join token (servers auto-generate if blank) | `""` |
+| `ludus_k3s_disable_components` | List of components to disable (e.g. `traefik`, `servicelb`) | `[]` |
+| `ludus_k3s_kubeconfig_mode` | File mode for written kubeconfig | `"644"` |
+| `ludus_k3s_install_dir` | Directory to install k3s binary | `/usr/local/bin` |
+| `ludus_k3s_data_dir` | k3s data directory | `/var/lib/rancher/k3s` |
+| `ludus_k3s_dashboard` | Whether to install a dashboard | `false` |
+| `ludus_k3s_dashboard_type` | Dashboard type: `"kubernetes"`, `"headlamp"`, or empty | `""` |
+
+## Usage
+### Example Ludus Configuration
+```
+# yaml-language-server: $schema=https://docs.ludus.cloud/schemas/range-config.json
 ludus:
-  - vm_name: "{{ range_id }}-ad-dc-win2022-server-x64-1"
-    hostname: "{{ range_id }}-DC01-2022"
-    template: win2022-server-x64-template
+  # k3s Server (Control Plane)
+  - vm_name: "{{ range_id }}-k3s-1"
+    hostname: "{{ range_id }}-k3s-server"
+    template: debian-12-x64-server-template
+    vlan: 10
+    ip_last_octet: 10
+    ram_gb: 4
+    cpus: 2
+    linux: true
+    roles:
+      - ludus_k3s
+    role_vars:
+      ludus_k3s_role: server
+      ludus_k3s_disable_components:
+        - traefik
+  # k3s Agent 1 (Worker Node)
+  - vm_name: "{{ range_id }}-k3s-agent-1"
+    hostname: "{{ range_id }}-k3s-agent-1"
+    template: debian-12-x64-server-template
     vlan: 10
     ip_last_octet: 11
-    ram_gb: 6
+    ram_gb: 2
+    cpus: 2
+    linux: true
+    roles:
+      - ludus_k3s
+    role_vars:
+      ludus_k3s_role: agent
+      ludus_k3s_server_url: "https://10.{{ range_second_octet }}.10.10:6443"
+  # k3s Agent 2 (Worker Node)
+  - vm_name: "{{ range_id }}-k3s-agent-2"
+    hostname: "{{ range_id }}-k3s-agent-2"
+    template: debian-12-x64-server-template
+    vlan: 10
+    ip_last_octet: 12
+    ram_gb: 2
+    cpus: 2
+    linux: true
+    roles:
+      - ludus_k3s
+    role_vars:
+      ludus_k3s_role: agent
+      ludus_k3s_server_url: "https://10.{{ range_second_octet }}.10.10:6443"
+  #########################################################
+  # For a nicer UI experience, add a Windows VM with 
+  #   headlamp and add your k3s cluster kubeconfig to it
+  #########################################################
+  - vm_name: "{{ range_id }}-win11-1"
+    hostname: "{{ range_id }}-WIN11-22H2-1"
+    template: win11-22h2-x64-enterprise-template
+    vlan: 10
+    ip_last_octet: 21
+    ram_gb: 8
     cpus: 4
     windows:
-      sysprep: true
-    domain:
-      fqdn: ludus.domain
-      role: primary-dc
-    roles:
-      - {{ your github username }}.{{ this repo name }}
-    role_vars:
-      {{ example role var usage }}
+      install_additional_tools: true
+      chocolatey_ignore_checksums: true
+      chocolatey_packages:
+        - vscodium
+        - headlamp
+        - kubernetes-helm # <-- Needed if you wish to use helm charts in headlamp
 ```
 
-## License
+## 🔗 Links
 
-[//]: # (If you change the License type, be sure to change the actual LICENSE file as well)
-GPLv3
+- k3s: https://k3s.io/
+- Headlamp: https://headlamp.dev
 
-## Author Information
+## For Ludus, by NetPenguins
 
-This role was created by [{{Your Github Username}}](https://github.com/{{ your github username }}), for [Ludus](https://ludus.cloud/).
+Happy Hacking🐧
+
